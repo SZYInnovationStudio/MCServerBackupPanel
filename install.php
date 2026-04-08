@@ -293,7 +293,7 @@ function executeBackup($taskId) {
         
         $size = filesize($backupFile);
         
-        $stmt = $pdo->prepare("INSERT INTO backups (server_id, task_id, filename, filepath, size, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
+        $stmt = $pdo->prepare("INSERT INTO backups (server_id, task_id, filename, filepath, size, is_public, created_at) VALUES (?, ?, ?, ?, ?, 1, NOW())");
         $stmt->execute([$task[\'server_id\'], $taskId, $filename, $backupFile, $size]);
         
         logMessage("备份完成: {$task[\'server_name\']} - {$filename} (文件数: $addedCount, 大小: " . round($size/1024/1024, 2) . "MB)", \'info\');

@@ -44,6 +44,13 @@ foreach ($servers as $server) {
 }
 
 $siteConfig = getSiteConfig();
+
+// 辅助函数：生成备份文件的直接访问URL
+function getBackupDownloadUrl($backup) {
+    $server_name = urlencode($backup['server_name']);
+    $filename = urlencode($backup['filename']);
+    return "/backups/{$server_name}/{$filename}";
+}
 ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -348,7 +355,10 @@ $siteConfig = getSiteConfig();
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($backups as $backup): ?>
+                        <?php foreach ($backups as $backup): 
+                            // 为每个备份生成直接下载URL
+                            $download_url = "/backups/" . urlencode($serverName) . "/" . urlencode($backup['filename']);
+                        ?>
                         <tr>
                             <td>
                                 <strong><?php echo htmlspecialchars($backup['filename']); ?></strong>
@@ -364,7 +374,8 @@ $siteConfig = getSiteConfig();
                             </td>
                             <td class="actions">
                                 <?php if ($backup['is_public']): ?>
-                                    <a href="../index.php?download=<?php echo $backup['id']; ?>" class="btn btn-primary btn-sm" target="_blank">📥 下载</a>
+                                    <!-- 直接跳转到文件真实路径，不使用 PHP 中转 -->
+                                    <a href="<?php echo $download_url; ?>" class="btn btn-primary btn-sm" target="_blank">📥 下载</a>
                                 <?php else: ?>
                                     <button class="btn btn-primary btn-sm" disabled style="opacity:0.5;" title="私有备份不可下载">📥 下载</button>
                                 <?php endif; ?>

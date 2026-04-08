@@ -18,6 +18,7 @@ $publicBackups = $stmt->fetchAll();
 $siteConfig = getSiteConfig();
 
 // 处理下载
+// 处理下载 - 直接重定向到文件 URL
 if (isset($_GET['download']) && is_numeric($_GET['download'])) {
     $backup_id = (int)$_GET['download'];
     $stmt = $pdo->prepare("SELECT b.*, s.name as server_name FROM backups b JOIN servers s ON b.server_id = s.id WHERE b.id = ? AND b.is_public = 1");
@@ -25,10 +26,16 @@ if (isset($_GET['download']) && is_numeric($_GET['download'])) {
     $backup = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($backup && file_exists($backup['filepath'])) {
-        header('Content-Type: application/zip');
-        header('Content-Disposition: attachment; filename="' . $backup['filename'] . '"');
-        header('Content-Length: ' . filesize($backup['filepath']));
-        readfile($backup['filepath']);
+        // 构建可直接访问的文件 URL
+        // 假设 backups 目录在网站根目录下，例如：/www/wwwroot/example.com/backups/
+        // 那么 URL 路径就是 /backups/服务器名/文件名
+        $server_name = urlencode($backup['server_name']);
+        $filename = urlencode($backup['filename']);
+        $file_url = "/backups/{$server_name}/{$filename}";
+        
+        // 302 临时重定向到文件真实地址
+        header('HTTP/1.1 302 Found');
+        header('Location: ' . $file_url);
         exit;
     } else {
         $error = '文件不存在或已被删除';
