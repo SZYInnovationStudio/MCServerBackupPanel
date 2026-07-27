@@ -1,0 +1,17 @@
+# MCServerBackupPanel — Apache Configuration
+# Basic security rules
+
+# Deny access to sensitive files
+<FilesMatch "^(config\.php|database\.sql)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Deny access to backup directory
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^backups/ - [F,L]
+</IfModule>
+
+# Default charset
+AddDefaultCharset UTF-8
