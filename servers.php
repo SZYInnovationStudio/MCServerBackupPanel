@@ -126,41 +126,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             || strpos($subPath, '..') !== false
                             || strpos($subPath, '/') === 0) {
                             $response = ['success' => false, 'message' => '无效路径'];
-                            break;
-                        }
-                        $currentDir = $baseDir . ($subPath !== '' ? '/' . $subPath : '');
-                        // Double-check: resolved path must stay within baseDir
-                        $resolved = realpath($currentDir);
-                        if ($resolved === false || strpos(str_replace('\\', '/', $resolved), str_replace('\\', '/', realpath($baseDir) ?: '')) !== 0) {
-                            $response = ['success' => false, 'message' => '拒绝访问'];
-                            break;
-                        }
-                        $currentDir = str_replace('\\', '/', $currentDir);
-
-                        if (!is_dir($currentDir)) {
-                            $response = ['success' => false, 'message' => '目录不存在：' . $currentDir];
                         } else {
-                            $items = [];
-                            $entries = scandir($currentDir);
-                            foreach ($entries as $entry) {
-                                if ($entry === '.' || $entry === '..') continue;
-                                $fullPath = $currentDir . '/' . $entry;
-                                $relPath = ($subPath ? $subPath . '/' : '') . $entry;
-                                $isDir = is_dir($fullPath);
-                                $items[] = [
-                                    'name' => $entry,
-                                    'path' => $relPath,
-                                    'is_dir' => $isDir,
-                                    'size' => $isDir ? null : (is_file($fullPath) ? filesize($fullPath) : 0),
-                                ];
+                            $currentDir = $baseDir . ($subPath !== '' ? '/' . $subPath : '');
+                            // Double-check: resolved path must stay within baseDir
+                            $resolved = realpath($currentDir);
+                            $baseReal = str_replace('\\', '/', (string) realpath($baseDir));
+                            if ($resolved === false || $baseReal === '' || strpos(str_replace('\\', '/', $resolved), $baseReal) !== 0) {
+                                $response = ['success' => false, 'message' => '拒绝访问'];
+                            } else {
+                                $currentDir = str_replace('\\', '/', $currentDir);
+
+                                if (!is_dir($currentDir)) {
+                                    $response = ['success' => false, 'message' => '目录不存在：' . $currentDir];
+                                } else {
+                                    $items = [];
+                                    $entries = scandir($currentDir);
+                                    foreach ($entries as $entry) {
+                                        if ($entry === '.' || $entry === '..') continue;
+                                        $fullPath = $currentDir . '/' . $entry;
+                                        $relPath = ($subPath ? $subPath . '/' : '') . $entry;
+                                        $isDir = is_dir($fullPath);
+                                        $items[] = [
+                                            'name' => $entry,
+                                            'path' => $relPath,
+                                            'is_dir' => $isDir,
+                                            'size' => $isDir ? null : (is_file($fullPath) ? filesize($fullPath) : 0),
+                                        ];
+                                    }
+                                    // Sort: directories first, then files
+                                    usort($items, function($a, $b) {
+                                        if ($a['is_dir'] && !$b['is_dir']) return -1;
+                                        if (!$a['is_dir'] && $b['is_dir']) return 1;
+                                        return strcasecmp($a['name'], $b['name']);
+                                    });
+                                    $response = ['success' => true, 'items' => $items, 'current_path' => $subPath];
+                                }
                             }
-                            // Sort: directories first, then files
-                            usort($items, function($a, $b) {
-                                if ($a['is_dir'] && !$b['is_dir']) return -1;
-                                if (!$a['is_dir'] && $b['is_dir']) return 1;
-                                return strcasecmp($a['name'], $b['name']);
-                            });
-                            $response = ['success' => true, 'items' => $items, 'current_path' => $subPath];
                         }
                     }
                 }
