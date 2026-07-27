@@ -11,8 +11,8 @@
 
 require_once __DIR__ . '/config.php';
 
-// If install.php exists and we're not already on it, redirect to installer
-if (file_exists(__DIR__ . '/install.php') && basename($_SERVER['SCRIPT_NAME']) !== 'install.php') {
+// If install not completed and installer exists, redirect to installer
+if (!file_exists(__DIR__ . '/install.lock') && file_exists(__DIR__ . '/install.php') && basename($_SERVER['SCRIPT_NAME']) !== 'install.php') {
     header('Location: ' . SITE_URL . '/install.php');
     exit;
 }

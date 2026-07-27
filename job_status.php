@@ -119,6 +119,9 @@ function renderStatusBadge(string $status): void
 }
 ?>
 
+<input type="hidden" id="global-csrf" value="<?php echo generateCSRF(); ?>">
+<input type="hidden" id="global-csrf-jobs" value="<?php echo generateCSRF(); ?>">
+
 <script>
 (function(){
     var autoTimer = null;
@@ -205,7 +208,12 @@ function renderStatusBadge(string $status): void
 
     window.cancelJob = function(id) {
         if (!confirm('确定要取消任务 #' + id + ' 吗？')) return;
-        fetch('jobs_handler.php?action=cancel&id=' + id)
+        var csrf = document.getElementById('global-csrf-jobs').value;
+        fetch('jobs_handler.php?action=cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'csrf_token=' + encodeURIComponent(csrf) + '&id=' + id
+        })
             .then(function(r){ return r.json(); })
             .then(function(data){
                 if (data.success) {
@@ -219,7 +227,12 @@ function renderStatusBadge(string $status): void
 
     window.clearJobs = function() {
         if (!confirm('确定清空所有已完成/失败的任务记录？运行中的不会被删除。')) return;
-        fetch('jobs_handler.php?action=clear')
+        var csrf = document.getElementById('global-csrf-jobs').value;
+        fetch('jobs_handler.php?action=clear', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'csrf_token=' + encodeURIComponent(csrf)
+        })
             .then(function(r){ return r.json(); })
             .then(function(data){
                 if (data.success) {

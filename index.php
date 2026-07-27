@@ -9,6 +9,12 @@
  * @version 1.1.0
  */
 
+// Auto-redirect to installer if not yet installed
+if (!file_exists(__DIR__ . '/install.lock') && file_exists(__DIR__ . '/install.php')) {
+    header('Location: ' . rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\') . '/install.php');
+    exit;
+}
+
 require_once __DIR__ . '/config.php';
 
 // ============================================================

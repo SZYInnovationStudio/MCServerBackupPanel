@@ -11,8 +11,8 @@
 
 require_once __DIR__ . '/config.php';
 
-// Redirect if install.php exists
-if (file_exists(__DIR__ . '/install.php')) {
+// Redirect if not yet installed (install.lock missing but install.php exists)
+if (!file_exists(__DIR__ . '/install.lock') && file_exists(__DIR__ . '/install.php')) {
     header('Location: ' . SITE_URL . '/install.php');
     exit;
 }

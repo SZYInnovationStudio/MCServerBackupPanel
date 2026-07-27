@@ -9,24 +9,13 @@
  * @version 1.0.0
  */
 
-// If already installed, redirect to main page
-if (!file_exists(__DIR__ . '/config.php')) {
-    // config.php template will be written during install
-} else {
-    // Check if DB tables exist
-    require_once __DIR__ . '/config.php';
-    try {
-        $db = getDB();
-        $db->query("SELECT 1 FROM config LIMIT 1");
-        // Already installed — delete self and redirect
-        if (file_exists(__FILE__)) {
-            @unlink(__FILE__);
-        }
-        header('Location: ' . SITE_URL . '/index.php');
-        exit;
-    } catch (Exception $e) {
-        // Not yet installed, continue
+// If already installed (install.lock exists), redirect to main page
+if (file_exists(__DIR__ . '/install.lock')) {
+    if (file_exists(__FILE__)) {
+        @unlink(__FILE__);
     }
+    header('Location: ' . (file_exists(__DIR__ . '/config.php') ? rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\') : '') . '/index.php');
+    exit;
 }
 
 $step = isset($_POST['step']) ? (int)$_POST['step'] : 1;
@@ -684,6 +673,9 @@ PHPFUNC;
 
         // Create index.php in backups for extra safety
         file_put_contents(__DIR__ . '/backups/index.php', "<?php\nhttp_response_code(403);\nexit;\n");
+
+        // Create install lock
+        file_put_contents(__DIR__ . '/install.lock', date('Y-m-d H:i:s'));
 
         $success = true;
 

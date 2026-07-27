@@ -120,7 +120,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $response = ['success' => false, 'message' => '服务器不存在'];
                     } else {
                         $baseDir = rtrim(str_replace('\\', '/', $server['directory']), '/');
-                        $currentDir = $baseDir . ($subPath ? '/' . ltrim($subPath, '/') : '');
+                        // Security: reject path traversal (.., null bytes, absolute paths in subPath)
+                        $subPath = str_replace('\\', '/', $subPath);
+                        if (strpos($subPath, "\0") !== false
+                            || strpos($subPath, '..') !== false
+                            || strpos($subPath, '/') === 0) {
+                            $response = ['success' => false, 'message' => '无效路径'];
+                            break;
+                        }
+                        $currentDir = $baseDir . ($subPath !== '' ? '/' . $subPath : '');
+                        // Double-check: resolved path must stay within baseDir
+                        $resolved = realpath($currentDir);
+                        if ($resolved === false || strpos(str_replace('\\', '/', $resolved), str_replace('\\', '/', realpath($baseDir) ?: '')) !== 0) {
+                            $response = ['success' => false, 'message' => '拒绝访问'];
+                            break;
+                        }
                         $currentDir = str_replace('\\', '/', $currentDir);
 
                         if (!is_dir($currentDir)) {

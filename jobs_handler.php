@@ -17,7 +17,17 @@ $db = getDB();
 $action = $_GET['action'] ?? '';
 
 if ($action === 'cancel') {
-    $id = (int)($_GET['id'] ?? 0);
+    // Require POST for destructive actions (CSRF protection)
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo json_encode(['success' => false, 'message' => 'Method not allowed'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    if (!verifyCSRF()) {
+        echo json_encode(['success' => false, 'message' => 'CSRF验证失败'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $id = (int)($_POST['id'] ?? 0);
     if ($id <= 0) {
         echo json_encode(['success' => false, 'message' => 'Invalid job ID'], JSON_UNESCAPED_UNICODE);
         exit;
@@ -25,7 +35,6 @@ if ($action === 'cancel') {
     $stmt = $db->prepare("DELETE FROM backup_jobs WHERE id = ? AND status IN ('running', 'pending')");
     $stmt->execute([$id]);
     if ($stmt->rowCount() > 0) {
-        // Compact IDs: reset AUTO_INCREMENT to the lowest available gap
         compactJobIds($db);
         echo json_encode(['success' => true, 'message' => 'Job deleted'], JSON_UNESCAPED_UNICODE);
     } else {
@@ -34,6 +43,16 @@ if ($action === 'cancel') {
     exit;
 
 } elseif ($action === 'clear') {
+    // Require POST for destructive actions (CSRF protection)
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo json_encode(['success' => false, 'message' => 'Method not allowed'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    if (!verifyCSRF()) {
+        echo json_encode(['success' => false, 'message' => 'CSRF验证失败'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
     $db->exec("DELETE FROM backup_jobs WHERE status NOT IN ('running', 'pending')");
     compactJobIds($db);
     echo json_encode(['success' => true, 'message' => 'All non-running jobs cleared'], JSON_UNESCAPED_UNICODE);
