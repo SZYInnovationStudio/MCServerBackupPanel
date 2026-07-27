@@ -606,6 +606,7 @@ adminHeader('备份管理', 'backup');
 <!-- Set Password Modal -->
 <div class="modal-overlay hidden" id="password-modal">
     <div class="modal pw-modal" style="max-width:400px;">
+        <form id="set-pwd-form" onsubmit="event.preventDefault(); savePassword();">
         <div class="modal-body" style="text-align:center;padding:28px 24px 20px;">
             <div class="pw-modal-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -617,14 +618,15 @@ adminHeader('备份管理', 'backup');
             <div class="pw-modal-title">设置下载密码</div>
             <div class="pw-modal-desc">为当前备份设置下载密码保护，用户在公开页下载时需输入密码。</div>
             <div class="form-group">
-                <input type="text" id="pwd-input" class="form-input pw-input-field" placeholder="请输入密码">
+                <input type="password" id="pwd-input" class="form-input pw-input-field" placeholder="请输入密码">
                 <p class="form-hint" style="margin-top:6px;font-size:12px;color:var(--text-muted);">留空则取消密码保护，无需密码即可下载</p>
             </div>
         </div>
         <div class="pw-modal-footer">
-            <button class="btn btn-secondary" onclick="closePwdModal()">取消</button>
-            <button class="btn btn-primary" id="btn-save-pwd" onclick="savePassword()">保存</button>
+            <button class="btn btn-secondary" onclick="closePwdModal()" type="button">取消</button>
+            <button class="btn btn-primary" id="btn-save-pwd" type="submit">保存</button>
         </div>
+        </form>
     </div>
 </div>
 
@@ -733,6 +735,7 @@ adminHeader('备份管理', 'backup');
 <!-- Encrypted download password modal (admin) -->
 <div class="modal-overlay hidden" id="enc-download-modal">
     <div class="modal pw-modal" style="max-width:400px;">
+        <form id="enc-dl-form" onsubmit="event.preventDefault(); submitEncDownload();">
         <div class="modal-body" style="text-align:center;padding:28px 24px 20px;">
             <div class="pw-modal-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -748,9 +751,10 @@ adminHeader('备份管理', 'backup');
             </div>
         </div>
         <div class="pw-modal-footer">
-            <button class="btn btn-secondary" onclick="closeEncDownloadModal()">取消</button>
-            <button class="btn btn-primary" id="btn-enc-dl-submit" onclick="submitEncDownload()">解锁下载</button>
+            <button class="btn btn-secondary" onclick="closeEncDownloadModal()" type="button">取消</button>
+            <button class="btn btn-primary" id="btn-enc-dl-submit" type="submit">解锁下载</button>
         </div>
+        </form>
     </div>
 </div>
 

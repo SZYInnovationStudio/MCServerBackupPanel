@@ -534,6 +534,7 @@ try {
     <!-- ========== 密码弹窗（自包含） ========== -->
     <div class="modal-overlay hidden" id="password-modal">
         <div class="modal pw-modal">
+            <form id="pw-form" onsubmit="event.preventDefault(); submitPassword();">
             <div class="modal-body">
                 <div class="pw-modal-icon">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -561,8 +562,9 @@ try {
             </div>
             <div class="pw-modal-footer">
                 <button class="btn btn-secondary" onclick="closePwModal()" type="button">取消</button>
-                <button class="btn btn-primary" id="pw-submit-btn" onclick="submitPassword()" type="button">确认下载</button>
+                <button class="btn btn-primary" id="pw-submit-btn" type="submit">确认下载</button>
             </div>
+            </form>
         </div>
     </div>
 
