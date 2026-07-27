@@ -550,7 +550,7 @@ try {
                            id="pw-input"
                            class="form-input"
                            placeholder="请输入下载密码"
-                           autocomplete="off"
+                           autocomplete="new-password"
                            style="text-align:center;font-size:16px;">
                 </div>
                 <div class="pw-error" id="pw-error">

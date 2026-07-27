@@ -618,7 +618,7 @@ adminHeader('备份管理', 'backup');
             <div class="pw-modal-title">设置下载密码</div>
             <div class="pw-modal-desc">为当前备份设置下载密码保护，用户在公开页下载时需输入密码。</div>
             <div class="form-group">
-                <input type="password" id="pwd-input" class="form-input pw-input-field" placeholder="请输入密码">
+                <input type="password" id="pwd-input" class="form-input pw-input-field" placeholder="请输入密码" autocomplete="new-password">
                 <p class="form-hint" style="margin-top:6px;font-size:12px;color:var(--text-muted);">留空则取消密码保护，无需密码即可下载</p>
             </div>
         </div>
@@ -747,7 +747,7 @@ adminHeader('备份管理', 'backup');
             <div class="pw-modal-title">输入下载密码</div>
             <div class="pw-modal-desc">此备份文件已设置下载密码保护，请输入密码以下载。</div>
             <div class="form-group">
-                <input type="password" id="enc-dl-pwd-input" class="form-input pw-input-field" placeholder="请输入下载密码" autocomplete="off">
+                <input type="password" id="enc-dl-pwd-input" class="form-input pw-input-field" placeholder="请输入下载密码" autocomplete="new-password">
             </div>
         </div>
         <div class="pw-modal-footer">
