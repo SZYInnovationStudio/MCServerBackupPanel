@@ -1,5 +1,7 @@
 # MCServerBackupPanel (MCSBP)
 
+[English](https://github.com/SZYInnovationStudio/MCServerBackupPanel/blob/main/en-readme.md)
+
 Minecraft 服务器备份管理面板，由 **SZY创新工作室** 开发。
 
 专业、简洁的服务器备份管理工具，支持多服务器定时备份、一键恢复、公开下载和密码保护。
