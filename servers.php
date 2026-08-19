@@ -59,10 +59,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($id <= 0) {
                     $response = ['success' => false, 'message' => '无效的服务器ID'];
                 } else {
+                    // 先物理删除该服务器所有备份归档，避免产生孤儿文件
+                    $records = $db->prepare("SELECT file_path FROM backup_records WHERE server_id = ?");
+                    $records->execute([$id]);
+                    $failedFiles = [];
+                    foreach ($records->fetchAll() as $r) {
+                        if (!empty($r['file_path']) && file_exists($r['file_path']) && !@unlink($r['file_path'])) {
+                            $failedFiles[] = $r['file_path'];
+                        }
+                    }
+
                     $db->prepare("DELETE FROM backup_records WHERE server_id = ?")->execute([$id]);
                     $db->prepare("DELETE FROM backup_tasks WHERE server_id = ?")->execute([$id]);
                     $db->prepare("DELETE FROM servers WHERE id = ?")->execute([$id]);
-                    $response = ['success' => true];
+
+                    if (!empty($failedFiles)) {
+                        $response = ['success' => true, 'message' => '服务器已删除，但有 ' . count($failedFiles) . ' 个归档文件删除失败（请手动清理）'];
+                    } else {
+                        $response = ['success' => true];
+                    }
                 }
             }
 

@@ -30,6 +30,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'verif
         exit;
     }
 
+    // 暴力破解防护：按 IP + 记录 ID + 会话联合限流
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $rateKey = 'dlpw:' . $ip . ':' . $id . ':' . (session_id() ?: 'nosess');
+    if (!rateLimitAllowed($rateKey, 5, 300, 900)) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => '尝试次数过多，请稍后再试'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
     try {
         $db = getDB();
         $stmt = $db->prepare("SELECT id, download_password FROM backup_records WHERE id = ? AND is_public = 1");
@@ -50,6 +59,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'verif
         }
 
         if (!password_verify($password, $record['download_password'])) {
+            rateLimitHit($rateKey);
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode(['success' => false, 'message' => '密码错误，请重试'], JSON_UNESCAPED_UNICODE);
             exit;

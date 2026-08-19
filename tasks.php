@@ -43,17 +43,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $encrypted        = (int)($_POST['encrypted'] ?? 0);
                 $encryptPassword  = trim($_POST['encrypt_password'] ?? '');
                 $pathType         = ($_POST['backup_path_type'] ?? 'relative') === 'absolute' ? 'absolute' : 'relative';
+                $defaultPublic    = (int)($_POST['default_public'] ?? 0);
 
                 if ($serverId <= 0 || $backupFolder === '' || $backupTime === '' || $backupDest === '' || $backupFilename === '') {
                     $response = ['success' => false, 'message' => '所有字段均为必填项'];
-                } elseif (!preg_match('/^\d{2}:\d{2}$/', $backupTime)) {
+                } elseif (!preg_match('/^\d{2}:\d{2}$/', $backupTime) || DateTime::createFromFormat('H:i', $backupTime) === false) {
                     $response = ['success' => false, 'message' => '备份时间格式无效'];
                 } elseif ($encrypted && $encryptPassword === '') {
                     $response = ['success' => false, 'message' => '启用下载密码保护时必须填写密码'];
+                } elseif ($encrypted && mb_strlen($encryptPassword) < 6) {
+                    $response = ['success' => false, 'message' => '下载密码长度至少 6 位'];
                 } else {
                     $encPass = ($encrypted && $encryptPassword !== '') ? encryptValue($encryptPassword) : null;
-                    $stmt = $db->prepare("INSERT INTO backup_tasks (server_id, backup_folder, backup_time, backup_destination, backup_path_type, backup_filename, backup_items, auto_delete, encrypted, encrypt_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
-                    $stmt->execute([$serverId, $backupFolder, $backupTime, $backupDest, $pathType, $backupFilename, $backupItems ?: null, $autoDelete, $encrypted, $encPass]);
+                    $stmt = $db->prepare("INSERT INTO backup_tasks (server_id, backup_folder, backup_time, backup_destination, backup_path_type, backup_filename, backup_items, auto_delete, encrypted, encrypt_password, default_public, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+                    $stmt->execute([$serverId, $backupFolder, $backupTime, $backupDest, $pathType, $backupFilename, $backupItems ?: null, $autoDelete, $encrypted, $encPass, $defaultPublic]);
                     $response = ['success' => true];
                 }
             }
@@ -69,27 +72,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $encrypted        = (int)($_POST['encrypted'] ?? 0);
                 $encryptPassword  = trim($_POST['encrypt_password'] ?? '');
                 $pathType         = ($_POST['backup_path_type'] ?? 'relative') === 'absolute' ? 'absolute' : 'relative';
+                $defaultPublic    = (int)($_POST['default_public'] ?? 0);
 
                 if ($id <= 0 || $backupFolder === '' || $backupTime === '' || $backupDest === '' || $backupFilename === '') {
                     $response = ['success' => false, 'message' => '所有字段均为必填项'];
+                } elseif (!preg_match('/^\d{2}:\d{2}$/', $backupTime) || DateTime::createFromFormat('H:i', $backupTime) === false) {
+                    $response = ['success' => false, 'message' => '备份时间格式无效'];
+                } elseif ($encrypted && $encryptPassword !== '' && mb_strlen($encryptPassword) < 6) {
+                    $response = ['success' => false, 'message' => '下载密码长度至少 6 位'];
                 } else {
-                    // Re-use existing password if encrypted but password field left empty
+                    $encPass = ($encrypted && $encryptPassword !== '') ? encryptValue($encryptPassword) : null;
+                    $hasError = false;
                     if ($encrypted && $encryptPassword === '') {
+                        // 编辑时留空密码：复用原密码，若原任务无密码则报错
                         $existing = $db->prepare("SELECT encrypted, encrypt_password FROM backup_tasks WHERE id = ?");
                         $existing->execute([$id]);
                         $row = $existing->fetch();
-                        if ($row && $row['encrypted'] && $row['encrypt_password']) {
+                        if ($row && $row['encrypted'] && !empty($row['encrypt_password'])) {
                             $encPass = $row['encrypt_password'];
                         } else {
-                            $encPass = encryptValue($encryptPassword);
+                            $response = ['success' => false, 'message' => '启用下载密码保护时必须填写密码'];
+                            $hasError = true;
                         }
-                    } else {
-                        $encPass = ($encrypted && $encryptPassword !== '') ? encryptValue($encryptPassword) : null;
                     }
 
-                    $stmt = $db->prepare("UPDATE backup_tasks SET backup_folder = ?, backup_time = ?, backup_destination = ?, backup_path_type = ?, backup_filename = ?, backup_items = ?, auto_delete = ?, encrypted = ?, encrypt_password = ? WHERE id = ?");
-                    $stmt->execute([$backupFolder, $backupTime, $backupDest, $pathType, $backupFilename, $backupItems ?: null, $autoDelete, $encrypted, $encPass, $id]);
-                    $response = ['success' => true];
+                    if (!$hasError) {
+                        $stmt = $db->prepare("UPDATE backup_tasks SET backup_folder = ?, backup_time = ?, backup_destination = ?, backup_path_type = ?, backup_filename = ?, backup_items = ?, auto_delete = ?, encrypted = ?, encrypt_password = ?, default_public = ? WHERE id = ?");
+                        $stmt->execute([$backupFolder, $backupTime, $backupDest, $pathType, $backupFilename, $backupItems ?: null, $autoDelete, $encrypted, $encPass, $defaultPublic, $id]);
+                        $response = ['success' => true];
+                    }
                 }
             }
 
@@ -137,6 +148,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $filename = safeFilename($filename);
                         if (!preg_match('/\.zip$/i', $filename)) $filename .= '.zip';
                         $filePath = preg_replace('#/+#', '/', rtrim($destDir, '/') . '/' . $filename);
+                        $filePath = uniqueBackupPath($filePath);
+                        $filename = basename($filePath);
 
                         if (!ensureDir($destDir)) {
                             $response = ['success' => false, 'message' => '无法创建备份目标目录：' . $destDir];
@@ -162,7 +175,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             [$zipOk, $zipResult] = createBackupZip($sourceDir, $filePath, $selectedItems, $db, $jobId);
 
                             if (!$zipOk) {
-                                @unlink($filePath);
+                                if (!@unlink($filePath)) {
+                                    logJob($db, $jobId, 'error', 'Failed to remove incomplete backup file: ' . $filePath);
+                                }
                                 logJob($db, $jobId, 'error', 'Backup failed: ' . $zipResult);
                                 setJobStatus($db, $jobId, 'failed', $zipResult);
                             } else {
@@ -182,8 +197,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         $encPassword = decryptValue($task['encrypt_password']);
                                         $dlPassword = password_hash($encPassword, PASSWORD_BCRYPT);
                                     }
-                                    $stmt = $db->prepare("INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, download_password, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, NOW())");
-                                    $stmt->execute([(int)$task['server_id'], $id, $filename, $fileSize, $filePath, $dlPassword]);
+                                    $isPublic = (int)($task['default_public'] ?? 0);
+                                    $stmt = $db->prepare("INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, download_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())");
+                                    $stmt->execute([(int)$task['server_id'], $id, $filename, $fileSize, $filePath, $isPublic, $dlPassword]);
                                     $recordId = (int)$db->lastInsertId();
                                     logJob($db, $jobId, 'info', 'Backup done: ' . formatSize($fileSize) . ' (record ' . $recordId . ')');
                                     setJobStatus($db, $jobId, 'success', '备份完成: ' . formatSize($fileSize));
@@ -194,7 +210,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             $oldRecords = $db->prepare("SELECT id, file_path FROM backup_records WHERE task_id = ? AND id != ? ORDER BY created_at DESC");
                                             $oldRecords->execute([$id, $recordId]);
                                             foreach ($oldRecords->fetchAll() as $old) {
-                                                @unlink($old['file_path']);
+                                                if (!@unlink($old['file_path'])) {
+                                                    logJob($db, $jobId, 'error', 'Failed to delete old backup file: ' . $old['file_path']);
+                                                }
                                                 $db->prepare("DELETE FROM backup_records WHERE id = ?")->execute([$old['id']]);
                                             }
                                             logJob($db, $jobId, 'info', 'Auto-deleted old backups');
@@ -267,6 +285,8 @@ function executeBackup(array $task, PDO $db): array
     }
 
     $filePath = preg_replace('#/+#', '/', rtrim($destDir, '/') . '/' . $filename);
+    $filePath = uniqueBackupPath($filePath);
+    $filename = basename($filePath);
 
     [$zipOk, $zipResult] = createBackupZip($sourceDir, $filePath, $selectedItems);
 
@@ -298,8 +318,9 @@ function executeBackup(array $task, PDO $db): array
             $dlPassword = password_hash($encPassword, PASSWORD_BCRYPT);
         }
 
-        $stmt = $db->prepare("INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, download_password, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, NOW())");
-        $stmt->execute([$task['server_id'], $task['id'], $filename, (int)$fileSize, $filePath, $dlPassword]);
+        $isPublic = (int)($task['default_public'] ?? 0);
+        $stmt = $db->prepare("INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, download_password, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())");
+        $stmt->execute([$task['server_id'], $task['id'], $filename, (int)$fileSize, $filePath, $isPublic, $dlPassword]);
 
         // Auto-delete old backups: keep only the latest
         if (!empty($task['auto_delete'])) {
@@ -522,6 +543,15 @@ adminHeader('备份任务', 'tasks');
                     </label>
                 </div>
 
+                <div class="form-group">
+                    <label class="form-label" for="task-default-public">新备份默认可见性</label>
+                    <select id="task-default-public" name="default_public" class="form-select" style="width:auto;min-width:220px;">
+                        <option value="0">私密（仅管理员可见）</option>
+                        <option value="1">公开（公开下载页可见）</option>
+                    </select>
+                    <div class="form-hint">该任务每次生成的备份将默认采用此可见性，可在备份记录中单独修改。</div>
+                </div>
+
                 <div class="form-group" style="border:1px solid var(--border-color);border-radius:var(--radius-card);padding:16px;">
                     <label class="form-checkbox-label" style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
                         <input type="checkbox" id="task-encrypted" name="encrypted" value="1"
@@ -586,6 +616,7 @@ function openAddModal() {
     document.getElementById('task-filename').value = '<?php echo htmlspecialchars($defaultFilename); ?>';
     document.getElementById('task-backup-items').value = '';
     document.getElementById('task-auto-delete').checked = false;
+    document.getElementById('task-default-public').value = '0';
     document.getElementById('task-encrypted').checked = false;
     document.getElementById('task-encrypt-password').value = '';
     document.getElementById('task-encrypt-password-group').style.display = 'none';
@@ -608,6 +639,7 @@ function openEditModal(task) {
     document.getElementById('task-filename').value = task.backup_filename;
     document.getElementById('task-backup-items').value = task.backup_items || '';
     document.getElementById('task-auto-delete').checked = (task.auto_delete == 1);
+    document.getElementById('task-default-public').value = (task.default_public == 0) ? '0' : '1';
     document.getElementById('task-encrypted').checked = (task.encrypted == 1);
     var encPwdGroup = document.getElementById('task-encrypt-password-group');
     var encPwdInput = document.getElementById('task-encrypt-password');

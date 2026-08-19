@@ -9,6 +9,19 @@
  * @version 1.0.0
  */
 
+// ── 安装授权保护：未安装状态防止被任意访客抢先初始化 ──
+// 本地 / CLI 直接放行；远程访问必须携带与 MCSBP_INSTALL_TOKEN 匹配的令牌。
+$__installToken = getenv('MCSBP_INSTALL_TOKEN') ?: null;
+$__isLocal = PHP_SAPI === 'cli'
+    || in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1', '::1'], true);
+if (!$__isLocal) {
+    $__providedToken = $_GET['token'] ?? ($_POST['token'] ?? '');
+    if ($__installToken === null || $__installToken === '' || !hash_equals($__installToken, $__providedToken)) {
+        http_response_code(403);
+        exit('禁止访问：安装向导仅允许本地（localhost/CLI）初始化，或通过设置环境变量 MCSBP_INSTALL_TOKEN 后携带 ?token= 访问。');
+    }
+}
+
 // If already installed (install.lock exists), redirect to main page
 if (file_exists(__DIR__ . '/install.lock')) {
     if (file_exists(__FILE__)) {
@@ -173,6 +186,7 @@ elseif ($step === 2):
     if ($password !== $passwordConf) $errors[] = '两次密码输入不一致。';
     if ($dbHost === '') $errors[] = '请填写数据库主机。';
     if ($dbName === '') $errors[] = '请填写数据库名称。';
+    elseif (!preg_match('/^[A-Za-z0-9_]+$/', $dbName)) $errors[] = '数据库名称只能包含字母、数字和下划线。';
     if ($dbUser === '') $errors[] = '请填写数据库用户名。';
 
     if (!empty($errors)) {
@@ -236,6 +250,16 @@ elseif ($step === 2):
         $insertConfig->execute([$siteName, $siteLogo ?: null, $icpNumber ?: null, $policeNumber ?: null]);
 
         // Write config.php with actual DB credentials
+        // 使用 var_export 生成安全字面量，防止值中含引号/反斜杠破坏配置或注入代码
+        $dbHostEsc = var_export($dbHost, true);
+        $dbPortEsc = var_export($dbPort, true);
+        $dbNameEsc = var_export($dbName, true);
+        $dbUserEsc = var_export($dbUser, true);
+        $dbPassEsc = var_export($dbPass, true);
+
+        // 安装时生成独立随机应用密钥（用于可逆加密），避免可预测
+        $appSecret = bin2hex(random_bytes(32));
+
         $configContent = <<<PHP
 <?php
 /**
@@ -252,17 +276,27 @@ elseif ($step === 2):
 // Session
 // --------------------------------------------------
 if (session_status() === PHP_SESSION_NONE) {
+    \$__secure = (!empty(\$_SERVER['HTTPS']) && \$_SERVER['HTTPS'] !== 'off')
+        || ((\$_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'domain'   => '',
+        'secure'   => \$__secure,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
     session_start();
 }
 
 // --------------------------------------------------
 // Database Configuration
 // --------------------------------------------------
-define('DB_HOST', '{$dbHost}');
-define('DB_PORT', '{$dbPort}');
-define('DB_NAME', '{$dbName}');
-define('DB_USER', '{$dbUser}');
-define('DB_PASS', '{$dbPass}');
+define('DB_HOST', {$dbHostEsc});
+define('DB_PORT', {$dbPortEsc});
+define('DB_NAME', {$dbNameEsc});
+define('DB_USER', {$dbUserEsc});
+define('DB_PASS', {$dbPassEsc});
 define('DB_CHARSET', 'utf8mb4');
 
 // --------------------------------------------------
@@ -301,13 +335,16 @@ function getDB(): PDO
         // Auto-migration
         \$migrations = [
             ["ALTER TABLE backup_tasks ADD COLUMN backup_path_type VARCHAR(10) NOT NULL DEFAULT 'relative' COMMENT 'relative or absolute' AFTER backup_destination", [1060]],
+            ["ALTER TABLE backup_tasks ADD COLUMN default_public TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'new backups default visibility: 1=public, 0=private' AFTER encrypted", [1060]],
         ];
         foreach (\$migrations as [\$sql, \$ignoreCodes]) {
             try {
                 \$pdo->exec(\$sql);
             } catch (PDOException \$e) {
                 \$code = (int) \$e->getCode();
-                if (!in_array(\$code, \$ignoreCodes, true) && \$e->getCode() !== '42S21') {}
+                if (!in_array(\$code, \$ignoreCodes, true) && \$e->getCode() !== '42S21') {
+                    error_log('MCSBP migration failed: ' . \$e->getMessage() . ' [SQL: ' . \$sql . ']');
+                }
             }
         }
     }
@@ -413,6 +450,11 @@ function ensureDir(string \$path): bool
     }
     return true;
 }
+
+// --------------------------------------------------
+// Application Secret（安装时生成的随机密钥）
+// --------------------------------------------------
+define('APP_SECRET', '{$appSecret}');
 PHP;
 
         file_put_contents(__DIR__ . '/config.php', $configContent);
@@ -423,7 +465,7 @@ PHP;
 // --------------------------------------------------
 // Encryption Helpers
 // --------------------------------------------------
-define('APP_SECRET', hash('sha256', DB_HOST . DB_NAME . DB_USER . __FILE__));
+// APP_SECRET 已在 config.php 主体中以安装时随机值定义
 
 function encryptValue(string $plaintext): string
 {
@@ -438,6 +480,62 @@ function decryptValue(string $encoded): string
     $iv = substr($data, 0, 16);
     $encrypted = substr($data, 16);
     return openssl_decrypt($encrypted, 'aes-256-cbc', APP_SECRET, 0, $iv);
+}
+
+function rateLimitAllowed(string $key, int $maxAttempts = 5, int $windowSeconds = 300, int $lockSeconds = 900): bool
+{
+    $dir = sys_get_temp_dir() . '/mcsbp_ratelimit';
+    if (!is_dir($dir)) { @mkdir($dir, 0700, true); }
+    $file = $dir . '/' . sha1($key) . '.json';
+    $data = ['attempts' => 0, 'window_start' => time(), 'locked_until' => 0];
+    if (is_file($file)) {
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (is_array($raw)) { $data = array_merge($data, $raw); }
+    }
+    $now = time();
+    if ($data['locked_until'] > $now) return false;
+    if ($now - $data['window_start'] > $windowSeconds) {
+        $data['attempts'] = 0;
+        $data['window_start'] = $now;
+    }
+    if ($data['attempts'] >= $maxAttempts) {
+        $data['locked_until'] = $now + $lockSeconds;
+        @file_put_contents($file, json_encode($data));
+        return false;
+    }
+    return true;
+}
+
+function rateLimitHit(string $key): void
+{
+    $dir = sys_get_temp_dir() . '/mcsbp_ratelimit';
+    if (!is_dir($dir)) { @mkdir($dir, 0700, true); }
+    $file = $dir . '/' . sha1($key) . '.json';
+    $data = ['attempts' => 0, 'window_start' => time(), 'locked_until' => 0];
+    if (is_file($file)) {
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (is_array($raw)) { $data = array_merge($data, $raw); }
+    }
+    $data['attempts']++;
+    @file_put_contents($file, json_encode($data));
+}
+
+function uniqueBackupPath(string $filePath): string
+{
+    if (!is_file($filePath)) {
+        return $filePath;
+    }
+    $dir = dirname($filePath);
+    $ext = pathinfo($filePath, PATHINFO_EXTENSION);
+    $base = $ext === '' ? basename($filePath) : substr(basename($filePath), 0, -(strlen($ext) + 1));
+    $suffix = date('Ymd_His');
+    $candidate = $dir . '/' . $base . '_' . $suffix . ($ext === '' ? '' : '.' . $ext);
+    $i = 1;
+    while (is_file($candidate)) {
+        $candidate = $dir . '/' . $base . '_' . $suffix . '_' . $i . ($ext === '' ? '' : '.' . $ext);
+        $i++;
+    }
+    return $candidate;
 }
 
 function normalizeBackupPath(string $path, ?bool $isAbsolute = null): string
@@ -469,6 +567,21 @@ function createBackupZip(string $sourceDir, string $destFile, array $selectedIte
     $log = function(string $msg) use ($db, $jobId) {
         if ($db && $jobId) logJob($db, $jobId, 'info', $msg);
     };
+
+    $isCancelled = function() use ($db, $jobId) {
+        if (!$db || !$jobId) return false;
+        try {
+            $stmt = $db->prepare("SELECT status FROM backup_jobs WHERE id = ?");
+            $stmt->execute([$jobId]);
+            return $stmt->fetchColumn() === 'cancel_requested';
+        } catch (Throwable $e) {
+            return false;
+        }
+    };
+
+    if ($isCancelled()) {
+        return [false, '备份已取消'];
+    }
 
     foreach ($selectedItems as $item) {
         $normalized = str_replace('\\', '/', trim($item));
@@ -559,6 +672,7 @@ function createBackupZip(string $sourceDir, string $destFile, array $selectedIte
                 $inner = new RecursiveDirectoryIterator($path, $flags);
             } catch (\UnexpectedValueException $e) { continue; }
             $iter = new RecursiveIteratorIterator($inner, RecursiveIteratorIterator::SELF_FIRST);
+            $ck = 0;
             foreach ($iter as $file) {
                 try {
                     $fp = $file->getRealPath();
@@ -568,6 +682,9 @@ function createBackupZip(string $sourceDir, string $destFile, array $selectedIte
                     if ($file->isDir()) { $zip->addEmptyDir($rp); }
                     else { if ($file->isReadable()) { $zip->addFile($fp, $rp); $fileCount++; } }
                 } catch (\RuntimeException $e) { continue; }
+                if (++$ck % 5000 === 0) {
+                    if ($isCancelled()) { $zip->close(); @unlink($destFile); return [false, '备份已取消']; }
+                }
             }
         }
         if ($fileCount === 0) { $zip->close(); @unlink($destFile); return [false, "无文件可备份"]; }
@@ -655,9 +772,9 @@ function streamDownload(string $filePath, string $filename): void
         if ($chunk === false || $chunk === '') break;
         echo $chunk;
         $chunks++;
-        if ($chunks % $flushEvery === 0) { ob_flush(); flush(); }
+        if ($chunks % $flushEvery === 0) { if (ob_get_level() > 0) { ob_flush(); } flush(); }
     }
-    ob_flush(); flush();
+    if (ob_get_level() > 0) { ob_flush(); } flush();
     fclose($fh);
     exit;
 }
@@ -668,8 +785,11 @@ PHPFUNC;
         if (!is_dir(__DIR__ . '/backups')) {
             mkdir(__DIR__ . '/backups', 0755, true);
         }
-        // Create .htaccess to prevent direct access
-        file_put_contents(__DIR__ . '/backups/.htaccess', "Deny from all\n");
+        // Create .htaccess to prevent direct access (Apache 2.2 / 2.4 兼容)
+        file_put_contents(__DIR__ . '/backups/.htaccess',
+            "# Deny all direct access\n" .
+            "<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n" .
+            "<IfModule !mod_authz_core.c>\n    Order allow,deny\n    Deny from all\n</IfModule>\n");
 
         // Create index.php in backups for extra safety
         file_put_contents(__DIR__ . '/backups/index.php', "<?php\nhttp_response_code(403);\nexit;\n");

@@ -13,6 +13,16 @@
 // Session
 // --------------------------------------------------
 if (session_status() === PHP_SESSION_NONE) {
+    $__secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'domain'   => '',
+        'secure'   => $__secure,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
     session_start();
 }
 
@@ -67,7 +77,7 @@ function getDB(): PDO
             ["ALTER TABLE backup_records ADD COLUMN download_password VARCHAR(255) DEFAULT NULL COMMENT 'hashed password for public download, NULL=no password' AFTER is_public", [1060]],
             ["ALTER TABLE backup_tasks ADD COLUMN backup_items TEXT DEFAULT NULL COMMENT 'JSON array of relative paths to backup, null=all files' AFTER backup_filename", [1060]],
             // MODIFY is always safe to re-run
-            ["ALTER TABLE backup_records MODIFY COLUMN is_public TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'default public'", []],
+            ["ALTER TABLE backup_records MODIFY COLUMN is_public TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'default private: 1=public, 0=private'", []],
             // New columns for auto-delete + encryption
             ["ALTER TABLE backup_tasks ADD COLUMN auto_delete TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'auto-delete old backups' AFTER backup_items", [1060]],
             ["ALTER TABLE backup_tasks ADD COLUMN encrypted TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'encrypt backup files' AFTER auto_delete", [1060]],
@@ -85,6 +95,7 @@ function getDB(): PDO
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4", [1050]],
             ["ALTER TABLE backup_tasks ADD COLUMN backup_path_type VARCHAR(10) NOT NULL DEFAULT 'relative' COMMENT 'relative or absolute' AFTER backup_destination", [1060]],
+            ["ALTER TABLE backup_tasks ADD COLUMN default_public TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'new backups default visibility: 1=public, 0=private' AFTER encrypted", [1060]],
         ];
         foreach ($migrations as [$sql, $ignoreCodes]) {
             try {
@@ -93,7 +104,7 @@ function getDB(): PDO
                 $code = (int) $e->getCode();
                 // MySQL error codes: 1060 = Duplicate column, 42S21 = SQLSTATE
                 if (!in_array($code, $ignoreCodes, true) && $e->getCode() !== '42S21') {
-                    // Unexpected error — silently skip to avoid breaking the page
+                    error_log('MCSBP migration failed: ' . $e->getMessage() . ' [SQL: ' . $sql . ']');
                 }
             }
         }
@@ -206,13 +217,92 @@ function ensureDir(string $path): bool
 }
 
 // --------------------------------------------------
+// Rate Limiting Helpers（登录与公开下载暴力破解防护）
+// --------------------------------------------------
+
+/**
+ * 检查某 key（如 IP + 场景）是否被限流。
+ *
+ * @param string $key           限流标识（建议含 IP，避免仅依赖可被清除的 session）
+ * @param int    $maxAttempts   窗口内最大失败次数
+ * @param int    $windowSeconds 统计窗口（秒）
+ * @param int    $lockSeconds   触发限流后的锁定时长（秒）
+ * @return bool true=允许继续尝试，false=已被限流
+ */
+function rateLimitAllowed(string $key, int $maxAttempts = 5, int $windowSeconds = 300, int $lockSeconds = 900): bool
+{
+    $dir = sys_get_temp_dir() . '/mcsbp_ratelimit';
+    if (!is_dir($dir)) { @mkdir($dir, 0700, true); }
+    $file = $dir . '/' . sha1($key) . '.json';
+    $data = ['attempts' => 0, 'window_start' => time(), 'locked_until' => 0];
+    if (is_file($file)) {
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (is_array($raw)) { $data = array_merge($data, $raw); }
+    }
+    $now = time();
+    if ($data['locked_until'] > $now) {
+        return false; // 锁定中
+    }
+    if ($now - $data['window_start'] > $windowSeconds) {
+        $data['attempts'] = 0;
+        $data['window_start'] = $now;
+    }
+    if ($data['attempts'] >= $maxAttempts) {
+        $data['locked_until'] = $now + $lockSeconds;
+        @file_put_contents($file, json_encode($data));
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 记录一次失败尝试。
+ */
+function rateLimitHit(string $key): void
+{
+    $dir = sys_get_temp_dir() . '/mcsbp_ratelimit';
+    if (!is_dir($dir)) { @mkdir($dir, 0700, true); }
+    $file = $dir . '/' . sha1($key) . '.json';
+    $data = ['attempts' => 0, 'window_start' => time(), 'locked_until' => 0];
+    if (is_file($file)) {
+        $raw = json_decode((string)@file_get_contents($file), true);
+        if (is_array($raw)) { $data = array_merge($data, $raw); }
+    }
+    $data['attempts']++;
+    @file_put_contents($file, json_encode($data));
+}
+
+/**
+ * 当目标文件已存在时，生成一个带时间戳后缀的唯一路径，避免覆盖现有备份。
+ */
+function uniqueBackupPath(string $filePath): string
+{
+    if (!is_file($filePath)) {
+        return $filePath;
+    }
+    $dir = dirname($filePath);
+    $ext = pathinfo($filePath, PATHINFO_EXTENSION);
+    $base = $ext === '' ? basename($filePath) : substr(basename($filePath), 0, -(strlen($ext) + 1));
+    $suffix = date('Ymd_His');
+    $candidate = $dir . '/' . $base . '_' . $suffix . ($ext === '' ? '' : '.' . $ext);
+    $i = 1;
+    while (is_file($candidate)) {
+        $candidate = $dir . '/' . $base . '_' . $suffix . '_' . $i . ($ext === '' ? '' : '.' . $ext);
+        $i++;
+    }
+    return $candidate;
+}
+
+// --------------------------------------------------
 // Encryption Helpers
 // --------------------------------------------------
 /**
- * Application secret — derived from DB credentials.
- * DO NOT change DB credentials after encrypted data has been stored!
+ * Application secret — 用于可逆加密。
+ * 生产环境由 install.php 安装时生成随机值（不可预测）。
+ * 此处作为未走安装流程时的默认值，加入 DB_PASS 以增加熵。
+ * 注意：变更此密钥会使已加密数据无法解密。
  */
-define('APP_SECRET', hash('sha256', DB_HOST . DB_NAME . DB_USER . __FILE__));
+define('APP_SECRET', getenv('MCSBP_APP_SECRET') ?: hash('sha256', DB_HOST . DB_NAME . DB_USER . DB_PASS . __FILE__));
 
 /**
  * Encrypt a plaintext string with APP_SECRET for reversible storage.
@@ -303,6 +393,21 @@ function createBackupZip(string $sourceDir, string $destFile, array $selectedIte
         if ($db && $jobId) logJob($db, $jobId, 'info', $msg);
     };
 
+    $isCancelled = function() use ($db, $jobId) {
+        if (!$db || !$jobId) return false;
+        try {
+            $stmt = $db->prepare("SELECT status FROM backup_jobs WHERE id = ?");
+            $stmt->execute([$jobId]);
+            return $stmt->fetchColumn() === 'cancel_requested';
+        } catch (Throwable $e) {
+            return false;
+        }
+    };
+
+    if ($isCancelled()) {
+        return [false, '备份已取消'];
+    }
+
     // ── Security: reject path traversal attempts ──
     foreach ($selectedItems as $item) {
         $normalized = str_replace('\\', '/', trim($item));
@@ -356,6 +461,11 @@ function createBackupZip(string $sourceDir, string $destFile, array $selectedIte
         $retCode = 0;
         @exec($cmd, $output, $retCode);
         $elapsed = round(microtime(true) - $startTime, 1);
+
+        if ($isCancelled()) {
+            @unlink($destFile);
+            return [false, '备份已取消'];
+        }
 
         if ($retCode === 0 && is_file($destFile) && filesize($destFile) > 0) {
             $sz = formatSize(filesize($destFile));
@@ -480,6 +590,11 @@ function createBackupZip(string $sourceDir, string $destFile, array $selectedIte
                 }
 
                 if (++$ck % 5000 === 0) {
+                    if ($isCancelled()) {
+                        $zip->close();
+                        @unlink($destFile);
+                        return [false, '备份已取消'];
+                    }
                     $log("... {$fileCount} files" . ($skipCount ? " ({$skipCount} skipped)" : ''));
                 }
             }
@@ -656,13 +771,13 @@ function streamDownload(string $filePath, string $filename): void
 
         // Flush periodically, not every chunk — reduces TCP small-packet overhead
         if ($chunks % $flushEvery === 0) {
-            ob_flush();
+            if (ob_get_level() > 0) { ob_flush(); }
             flush();
         }
     }
 
     // Final flush for any remaining data
-    ob_flush();
+    if (ob_get_level() > 0) { ob_flush(); }
     flush();
 
     fclose($fh);

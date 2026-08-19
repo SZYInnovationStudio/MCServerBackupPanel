@@ -29,9 +29,13 @@ $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $rateKey = 'login:' . $ip . ':' . $username;
 
     if ($username === '' || $password === '') {
         $error = '请输入用户名和密码。';
+    } elseif (!rateLimitAllowed($rateKey)) {
+        $error = '尝试次数过多，请 15 分钟后再试。';
     } else {
         try {
             $db = getDB();
@@ -46,6 +50,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: ' . SITE_URL . '/console.php');
                 exit;
             } else {
+                rateLimitHit($rateKey);
                 $error = '用户名或密码错误。';
             }
         } catch (Exception $e) {

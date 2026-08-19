@@ -23,6 +23,15 @@ if (php_sapi_name() !== 'cli') {
 require_once __DIR__ . '/config.php';
 
 $db = getDB();
+
+// Prevent concurrent cron runs (file-based mutex)
+$lockFile = sys_get_temp_dir() . '/mcsbp_cron.lock';
+$lockHandle = @fopen($lockFile, 'c');
+if ($lockHandle === false || !flock($lockHandle, LOCK_EX | LOCK_NB)) {
+    if ($lockHandle !== false) { fclose($lockHandle); }
+    exit(0); // another cron instance is still running
+}
+
 $now = date('H:i');
 
 // Find tasks scheduled for this minute
@@ -75,6 +84,8 @@ foreach ($tasks as $task) {
     }
 
     $filePath = preg_replace('#/+#', '/', rtrim($destDir, '/') . '/' . $filename);
+    $filePath = uniqueBackupPath($filePath);
+    $filename = basename($filePath);
 
     // Parse selected backup items from task config (null or empty = entire source dir)
     $selectedItems = [];
@@ -85,7 +96,9 @@ foreach ($tasks as $task) {
     [$zipOk, $zipResult] = createBackupZip($sourceDir, $filePath, $selectedItems);
 
     if (!$zipOk) {
-        @unlink($filePath);
+        if (!@unlink($filePath)) {
+            echo "  WARNING: failed to remove incomplete archive: {$filePath}\n";
+        }
         echo "  ERROR: {$zipResult}\n";
         continue;
     }
@@ -102,7 +115,9 @@ foreach ($tasks as $task) {
         if ($r < 4) { usleep(100000); clearstatcache(); }
     }
     if (!$exists) {
-        @unlink($filePath);
+        if (!@unlink($filePath)) {
+            echo "  WARNING: failed to remove empty archive: {$filePath}\n";
+        }
         echo "  ERROR: ZIP file is 0 bytes.\n";
         continue;
     }
@@ -114,11 +129,12 @@ foreach ($tasks as $task) {
             $dlPassword = password_hash($encPassword, PASSWORD_BCRYPT);
         }
 
+        $isPublic = (int)($task['default_public'] ?? 0);
         $insertStmt = $db->prepare(
             "INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, download_password, created_at)
-             VALUES (?, ?, ?, ?, ?, 1, ?, NOW())"
+             VALUES (?, ?, ?, ?, ?, ?, ?, NOW())"
         );
-        $insertStmt->execute([$task['server_id'], $task['id'], $filename, (int)$fileSize, $filePath, $dlPassword]);
+        $insertStmt->execute([$task['server_id'], $task['id'], $filename, (int)$fileSize, $filePath, $isPublic, $dlPassword]);
 
         // Auto-delete old backups
         if (!empty($task['auto_delete'])) {
@@ -129,7 +145,9 @@ foreach ($tasks as $task) {
             $stmtDel->execute([$task['id'], $recordId]);
             $oldRecords = $stmtDel->fetchAll();
             foreach ($oldRecords as $old) {
-                @unlink($old['file_path']);
+                if (!@unlink($old['file_path'])) {
+                    echo "  WARNING: failed to delete old backup: {$old['file_path']}\n";
+                }
                 $db->prepare("DELETE FROM backup_records WHERE id = ?")->execute([$old['id']]);
             }
         }
@@ -138,3 +156,6 @@ foreach ($tasks as $task) {
 }
 
 echo "[" . date('Y-m-d H:i:s') . "] Cron job completed. " . count($tasks) . " tasks processed.\n";
+
+flock($lockHandle, LOCK_UN);
+fclose($lockHandle);

@@ -32,13 +32,13 @@ if ($action === 'cancel') {
         echo json_encode(['success' => false, 'message' => 'Invalid job ID'], JSON_UNESCAPED_UNICODE);
         exit;
     }
-    $stmt = $db->prepare("DELETE FROM backup_jobs WHERE id = ? AND status IN ('running', 'pending')");
+    // 将运行中的任务标记为“请求取消”，由 createBackupZip 在压缩循环中检测并中止。
+    $stmt = $db->prepare("UPDATE backup_jobs SET status = 'cancel_requested', message = '用户已请求取消' WHERE id = ? AND status IN ('running', 'pending')");
     $stmt->execute([$id]);
     if ($stmt->rowCount() > 0) {
-        compactJobIds($db);
-        echo json_encode(['success' => true, 'message' => 'Job deleted'], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success' => true, 'message' => '已请求取消任务，正在停止压缩...'], JSON_UNESCAPED_UNICODE);
     } else {
-        echo json_encode(['success' => false, 'message' => 'Job not found or not in running/pending state'], JSON_UNESCAPED_UNICODE);
+        echo json_encode(['success' => false, 'message' => '任务不存在或已结束'], JSON_UNESCAPED_UNICODE);
     }
     exit;
 

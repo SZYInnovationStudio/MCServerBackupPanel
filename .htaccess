@@ -1,13 +1,22 @@
 # MCServerBackupPanel — Apache Configuration
 # Basic security rules
 
-# Deny access to sensitive files
-<FilesMatch "^(config\.php|database\.sql)$">
-    Order allow,deny
-    Deny from all
-</FilesMatch>
+# Deny access to sensitive files (Apache 2.4)
+<IfModule mod_authz_core.c>
+    <FilesMatch "^(config\.php|database\.sql|install\.lock|.*\.log|.*\.sql)$">
+        Require all denied
+    </FilesMatch>
+</IfModule>
 
-# Deny access to backup directory
+# Deny access to sensitive files (Apache 2.2 fallback)
+<IfModule !mod_authz_core.c>
+    <FilesMatch "^(config\.php|database\.sql|install\.lock|.*\.log|.*\.sql)$">
+        Order allow,deny
+        Deny from all
+    </FilesMatch>
+</IfModule>
+
+# Deny direct access to the backup archive directory
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule ^backups/ - [F,L]

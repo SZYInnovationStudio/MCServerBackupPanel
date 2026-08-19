@@ -52,12 +52,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $record->execute([$id]);
                     $record = $record->fetch();
                     if ($record) {
+                        $fileRemoved = true;
                         if (file_exists($record['file_path'])) {
-                            @unlink($record['file_path']);
+                            $fileRemoved = @unlink($record['file_path']);
                         }
                         $db->prepare("DELETE FROM backup_records WHERE id = ?")->execute([$id]);
                     }
-                    $response = ['success' => true];
+                    $response = ['success' => true, 'message' => $fileRemoved ? '已删除' : '记录已删除，但文件删除失败（请手动清理）'];
                 }
             }
 
@@ -133,12 +134,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $zip->close();
                                 $response = ['success' => false, 'message' => '备份文件包含不安全路径，拒绝恢复'];
                             } else {
-                                $zip->extractTo($serverDir);
+                                $extractOk = $zip->extractTo($serverDir);
                                 $zip->close();
-                                $restoreMsg = $preRestoreDone
-                                    ? '备份已恢复至服务器目录。恢复前已自动备份原文件。'
-                                    : '备份已恢复至服务器目录。（注意：恢复前自动备份失败，无回滚文件）';
-                                $response = ['success' => true, 'message' => $restoreMsg];
+                                if (!$extractOk) {
+                                    $response = ['success' => false, 'message' => '恢复失败：解压文件时出错（权限不足或磁盘已满？）'];
+                                } else {
+                                    $restoreMsg = $preRestoreDone
+                                        ? '备份已恢复至服务器目录。恢复前已自动备份原文件。'
+                                        : '备份已恢复至服务器目录。（注意：恢复前自动备份失败，无回滚文件）';
+                                    $response = ['success' => true, 'message' => $restoreMsg];
+                                }
                             }
                         }
                     }
@@ -151,6 +156,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pwd = trim($_POST['password'] ?? '');
                 if ($id <= 0) {
                     $response = ['success' => false, 'message' => '无效记录ID'];
+                } elseif ($pwd !== '' && mb_strlen($pwd) < 6) {
+                    $response = ['success' => false, 'message' => '密码长度至少 6 位'];
                 } else {
                     if ($pwd === '') {
                         $db->prepare("UPDATE backup_records SET download_password = NULL WHERE id = ?")->execute([$id]);
@@ -197,6 +204,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
+            // Verify download password (admin) — 合并进主分派器，避免此前位于 exit 之后不可达
+            elseif ($action === 'verify_admin_download') {
+                $recordId = (int)($_POST['record_id'] ?? 0);
+                $password = $_POST['password'] ?? '';
+                $record = $db->prepare("SELECT * FROM backup_records WHERE id = ?");
+                $record->execute([$recordId]);
+                $record = $record->fetch();
+                if (!$record || empty($record['download_password'])) {
+                    $response = ['success' => false, 'message' => '该备份无密码保护'];
+                } elseif (!password_verify($password, $record['download_password'])) {
+                    $response = ['success' => false, 'message' => '密码错误'];
+                } else {
+                    $_SESSION['download_auth_' . $recordId] = true;
+                    $response = ['success' => true];
+                }
+            }
+
             // Immediate backup
             elseif ($action === 'backup_now') {
                 set_time_limit(0);
@@ -204,8 +228,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $serverId = (int)($_POST['server_id'] ?? 0);
                 $selectedItems = json_decode($_POST['backup_items'] ?? '[]', true) ?: [];
+                $isPublic = (int)($_POST['is_public'] ?? 0);
                 if ($serverId <= 0) {
                     $response = ['success' => false, 'message' => '无效服务器ID'];
+                } elseif (empty($selectedItems)) {
+                    $response = ['success' => false, 'message' => '请至少选择一个备份内容'];
                 } else {
                     $server = $db->prepare("SELECT * FROM servers WHERE id = ?");
                     $server->execute([$serverId]);
@@ -245,6 +272,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
 
                             $filePath = preg_replace('#/+#', '/', rtrim($destDir, '/') . '/' . $filename);
+                            $filePath = uniqueBackupPath($filePath);
+                            $filename = basename($filePath);
 
                             // Insert job record
                             $jobStmt = $db->prepare("INSERT INTO backup_jobs (server_id, task_id, filename, status, message) VALUES (?, NULL, ?, 'running', '开始备份...')");
@@ -265,7 +294,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             [$zipOk, $zipResult] = createBackupZip($sourceDir, $filePath, $selectedItems, $db, $jobId);
 
                             if (!$zipOk) {
-                                @unlink($filePath);
+                                if (!@unlink($filePath)) {
+                                    logJob($db, $jobId, 'error', 'Failed to remove incomplete backup file: ' . $filePath);
+                                }
                                 logJob($db, $jobId, 'error', 'Backup failed: ' . $zipResult);
                                 setJobStatus($db, $jobId, 'failed', $zipResult);
                             } else {
@@ -280,12 +311,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     if ($r < 4) { usleep(100000); clearstatcache(); }
                                 }
                                 if (!$exists) {
-                                    @unlink($filePath);
+                                    if (!@unlink($filePath)) {
+                                        logJob($db, $jobId, 'error', 'Failed to remove empty backup file: ' . $filePath);
+                                    }
                                     logJob($db, $jobId, 'error', 'ZIP file is 0 bytes');
                                     setJobStatus($db, $jobId, 'failed', 'ZIP文件写入失败（0字节）');
                                 } else {
-                                    $stmt = $db->prepare("INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, created_at) VALUES (?, NULL, ?, ?, ?, 1, NOW())");
-                                    $stmt->execute([$serverId, $filename, $fileSize, $filePath]);
+                                    $stmt = $db->prepare("INSERT INTO backup_records (server_id, task_id, filename, file_size, file_path, is_public, created_at) VALUES (?, NULL, ?, ?, ?, ?, NOW())");
+                                    $stmt->execute([$serverId, $filename, $fileSize, $filePath, $isPublic]);
                                     $recordId = (int)$db->lastInsertId();
                                     logJob($db, $jobId, 'info', 'Backup done: ' . formatSize($fileSize) . ' (record ' . $recordId . ')');
                                     setJobStatus($db, $jobId, 'success', '备份完成: ' . formatSize($fileSize));
@@ -353,38 +386,6 @@ if (isset($_GET['download']) && !empty($_SESSION['admin_id'])) {
         }
     }
     // Fall through to normal page if download fails
-}
-
-// Handle password verification for encrypted download (admin)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'verify_admin_download') {
-    ob_start();
-    try {
-        if (!verifyCSRF()) {
-            echo json_encode(['success' => false, 'message' => 'CSRF验证失败，请刷新页面后重试。']);
-            ob_end_clean();
-            exit;
-        }
-        $recordId = (int)($_POST['record_id'] ?? 0);
-        $password = $_POST['password'] ?? '';
-
-        $record = $db->prepare("SELECT * FROM backup_records WHERE id = ?");
-        $record->execute([$recordId]);
-        $record = $record->fetch();
-
-        if (!$record || empty($record['download_password'])) {
-            echo json_encode(['success' => false, 'message' => '该备份无密码保护']);
-        } elseif (!password_verify($password, $record['download_password'])) {
-            echo json_encode(['success' => false, 'message' => '密码错误']);
-        } else {
-            $_SESSION['download_auth_' . $recordId] = true;
-            session_write_close();
-            echo json_encode(['success' => true]);
-        }
-    } catch (Exception $e) {
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
-    ob_end_clean();
-    exit;
 }
 
 // Fetch backup records
@@ -475,6 +476,11 @@ adminHeader('备份管理', 'backup');
 
             <!-- Backup button -->
             <div id="backup-action-row" class="hidden" style="margin-top:16px;">
+                <label class="form-label" for="backup-is-public">备份可见性</label>
+                <select id="backup-is-public" class="form-select" style="width:auto;min-width:180px;margin-bottom:12px;">
+                    <option value="0">私密（仅管理员可见）</option>
+                    <option value="1">公开（公开下载页可见）</option>
+                </select>
                 <button class="btn btn-primary" id="btn-backup-selected" onclick="startBackup()">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                     立即备份
@@ -1218,12 +1224,18 @@ function startBackup() {
         return;
     }
     var selected = getSelectedItems();
+    if (selected.length === 0) {
+        showToast('warning', '提示', '请至少选择一个备份内容');
+        return;
+    }
     var filenameInput = document.getElementById('backup-filename-input');
     var customFilename = filenameInput ? filenameInput.value.trim() : '';
     var destInput = document.getElementById('backup-dest-input');
     var backupDest = destInput ? destInput.value.trim() : '';
     var pathTypeSelect = document.getElementById('backup-path-type');
     var pathType = pathTypeSelect ? pathTypeSelect.value : 'relative';
+    var isPublicSelect = document.getElementById('backup-is-public');
+    var isPublic = isPublicSelect ? isPublicSelect.value : '1';
     var btn = document.getElementById('btn-backup-selected');
     var originalHtml = btn.innerHTML;
     btn.disabled = true;
@@ -1232,14 +1244,14 @@ function startBackup() {
     fetch('backup.php', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=backup_now&csrf_token=' + encodeURIComponent(document.getElementById('global-csrf').value) + '&server_id=' + serverId + '&backup_items=' + encodeURIComponent(JSON.stringify(selected)) + '&backup_filename=' + encodeURIComponent(customFilename) + '&backup_destination=' + encodeURIComponent(backupDest) + '&backup_path_type=' + encodeURIComponent(pathType)
+        body: 'action=backup_now&csrf_token=' + encodeURIComponent(document.getElementById('global-csrf').value) + '&server_id=' + serverId + '&backup_items=' + encodeURIComponent(JSON.stringify(selected)) + '&backup_filename=' + encodeURIComponent(customFilename) + '&backup_destination=' + encodeURIComponent(backupDest) + '&backup_path_type=' + encodeURIComponent(pathType) + '&is_public=' + encodeURIComponent(isPublic)
     })
     .then(function(r) { return r.json(); })
     .then(function(res) {
         btn.disabled = false;
         btn.innerHTML = originalHtml;
         if (res.success) {
-            showToast('success', '备份完成', res.message);
+            showToast('success', '备份已提交', res.message);
             setTimeout(function() { location.reload(); }, 800);
         } else {
             showToast('error', '备份失败', res.message);
